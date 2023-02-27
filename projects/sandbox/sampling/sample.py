@@ -128,19 +128,35 @@ def main(
         "Drawing {} samples for each test data".format(num_samples_draw)
     )
     results = []
+    descaled_results = []
     total_sampling_time = 0.0
     for signal, param in test_dataloader:
         signal = signal.to(device)
         param = param.to(device)
-        strain, parameter = preprocessor(signal, param)
+        strain, scaled_param = preprocessor(signal, param)
 
         _time = time()
         with torch.no_grad():
             samples = flow_obj.flow.sample(num_samples_draw, context=strain)
+            descaled_samples = preprocessor.scaler(
+                samples[0].transpose(1, 0), reverse=True
+            )
+            descaled_samples = descaled_samples.unsqueeze(0).transpose(2, 1)
+
+        print(samples.shape, descaled_samples.shape)
+        descaled_results.append(
+            _cast_as_bilby_result(
+                descaled_samples.cpu().numpy(),
+                param.cpu().numpy(),
+                inference_params,
+                priors,
+            )
+        )
+
         results.append(
             _cast_as_bilby_result(
                 samples.cpu().numpy(),
-                parameter.cpu().numpy(),
+                scaled_param.cpu().numpy(),
                 inference_params,
                 priors,
             )
@@ -156,9 +172,20 @@ def main(
         )
     )
     logging.info("Making pp-plot")
+    pp_plot_scaled_filename = outdir / "pp-plot-test-set-scaled.png"
     pp_plot_filename = outdir / "pp-plot-test-set.png"
 
     bilby.result.make_pp_plot(
-        results, save=True, filename=pp_plot_filename, keys=inference_params
+        results,
+        save=True,
+        filename=pp_plot_scaled_filename,
+        keys=inference_params,
+    )
+
+    bilby.result.make_pp_plot(
+        descaled_results,
+        save=True,
+        filename=pp_plot_filename,
+        keys=inference_params,
     )
     logging.info("Plot saved in %s" % (pp_plot_filename))
