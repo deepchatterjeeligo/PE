@@ -143,7 +143,6 @@ def main(
             )
             descaled_samples = descaled_samples.unsqueeze(0).transpose(2, 1)
 
-        print(samples.shape, descaled_samples.shape)
         descaled_results.append(
             _cast_as_bilby_result(
                 descaled_samples.cpu().numpy(),
