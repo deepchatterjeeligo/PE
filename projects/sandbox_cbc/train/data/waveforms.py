@@ -70,7 +70,8 @@ class FrequencyDomainWaveformGenerator:
             self.approximant = approximant
 
     def frequency_domain_strain(self, *args, **kwargs):
-        kwargs["f_ref"] = self.f_ref  # FIXME: handle this better
+        kwargs["f_ref"] = self.f_ref  #FIXME: handle this better
+        jitter_time = kwargs.pop('jitter_time', False)  #FIXME: same
 
         freq_mask = self.frequency_array >= self.f_min
         freq_mask *= self.frequency_array < self.f_max
@@ -91,8 +92,14 @@ class FrequencyDomainWaveformGenerator:
             device=self.device,
             dtype=_hc.dtype,
         )
-        _frequency_domain_h_plus[..., freq_mask] = _hp
-        _frequency_domain_h_cross[..., freq_mask] = _hc
+        # shift waveform by a random jitter for whole batch
+        mc, *_ = args  # FIXME: assumption to get the batch size
+        time_shifts = torch.zeros_like(mc) if not jitter_time else \
+            torch.rand_like(mc)  # up to 1s "pull back"
+        phase_shift = torch.outer(time_shifts, self.frequency_array[freq_mask])
+        phase_shift = torch.exp(1j * 2*torch.pi*phase_shift)
+        _frequency_domain_h_plus[..., freq_mask] = _hp * phase_shift
+        _frequency_domain_h_cross[..., freq_mask] = _hc * phase_shift
         return _frequency_domain_h_plus, _frequency_domain_h_cross
 
     def time_domain_strain(self, *args, **kwargs):

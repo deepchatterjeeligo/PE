@@ -69,7 +69,7 @@ class MaskedAutoRegressiveFlow(pl.LightningModule, NormalizingFlow):
         self.transforms = ConditionalComposeTransformModule(self.transforms)
 
     def training_step(self, batch, batch_idx):
-        strain, parameters = batch
+        strain, parameters, _ = batch
         loss = -self.log_prob(parameters, context=strain).mean()
         self.log(
             "train_loss", loss, on_step=True, prog_bar=True, sync_dist=False
@@ -77,7 +77,7 @@ class MaskedAutoRegressiveFlow(pl.LightningModule, NormalizingFlow):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        strain, parameters = batch
+        strain, parameters, _ = batch
         loss = -self.log_prob(parameters, context=strain).mean()
         self.log(
             "valid_loss", loss, on_epoch=True, prog_bar=True, sync_dist=True
@@ -89,7 +89,7 @@ class MaskedAutoRegressiveFlow(pl.LightningModule, NormalizingFlow):
         self.num_plotted = 0
 
     def test_step(self, batch, batch_idx):
-        strain, parameters = batch
+        strain, parameters, _ = batch
         res = utils.draw_samples_from_model(
             strain,
             parameters,

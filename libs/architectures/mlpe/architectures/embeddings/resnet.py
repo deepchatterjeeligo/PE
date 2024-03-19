@@ -6,10 +6,12 @@ but with 1d convolutions and arbitrary kernel sizes
 
 from typing import Callable, List, Literal, Optional, Tuple
 
+from lightning import pytorch as pl
 import torch
 import torch.nn as nn
 from torch import Tensor
 
+from .. import losses
 
 class ChannelNorm(torch.nn.Module):
     def __init__(
@@ -231,7 +233,7 @@ class Bottleneck(nn.Module):
         return out
 
 
-class ResNet(nn.Module):
+class ResNet(pl.LightningModule):
     """1D ResNet architecture
 
     Simple extension of ResNet to 1D convolutions with
@@ -391,6 +393,7 @@ class ResNet(nn.Module):
                     nn.init.constant_(m.bn3.weight, 0)
                 elif isinstance(m, BasicBlock):
                     nn.init.constant_(m.bn2.weight, 0)
+        self.vicreg_loss = losses.VICRegLoss()
 
     def _make_layer(
         self,
@@ -465,6 +468,37 @@ class ResNet(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         return self._forward_impl(x)
+
+    def training_step(self, batch, batch_idx):
+        X_ref, X_jittered, *_ = batch
+        loss = self.vicreg_loss(self(X_ref), self(X_jittered))
+        self.log(
+            "train_loss", loss, on_epoch=True, prog_bar=True, sync_dist=False
+        )
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        X_ref, X_jittered, *_ = batch
+        loss = self.vicreg_loss(self(X_ref), self(X_jittered))
+        self.log(
+            "valid_loss", loss, on_epoch=True, prog_bar=True, sync_dist=True
+        )
+        return loss
+
+    def configure_optimizers(self):
+        opt = torch.optim.AdamW(self.parameters(), lr=torch.cuda.device_count() * 1e-3)
+        scheduler1 = torch.optim.lr_scheduler.ReduceLROnPlateau(opt)
+        scheduler2 = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.9)
+        return (
+            {
+                "optimizer": opt,
+                "lr_scheduler": {
+                    "scheduler": scheduler1,
+                    "monitor": "metric_to_track",
+                },
+            },
+            {"optimizer": opt, "lr_scheduler": scheduler2},
+        )
 
 
 # TODO: implement as arg of ResNet instead?

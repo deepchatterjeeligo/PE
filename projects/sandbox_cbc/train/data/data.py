@@ -124,8 +124,124 @@ class PEInMemoryDataset(InMemoryDataset):
             transformed_X, transformed_parameters = self.preprocessor(
                 X, parameters.T
             )
-        return transformed_X.to(dtype=torch.float32), transformed_parameters.to(dtype=torch.float32)
+        return transformed_X.to(dtype=torch.float32), transformed_parameters.to(dtype=torch.float32), waveforms
 
+
+class TimeJitteredPEInMemoryDataset(InMemoryDataset):
+    def __init__(
+        self,
+        X: np.ndarray,
+        waveform_generator: FrequencyDomainWaveformGenerator,
+        prior: dict,
+        kernel_size: int,
+        preprocessor: Optional[Callable] = None,
+        batch_size: int = 32,
+        batches_per_epoch: Optional[int] = None,
+        coincident: bool = True,
+        shuffle: bool = True,
+        device: str = "cpu",
+    ) -> None:
+        super().__init__(
+            X,
+            kernel_size,
+            batch_size=batch_size,
+            stride=1,
+            batches_per_epoch=batches_per_epoch,
+            coincident=coincident,
+            shuffle=shuffle,
+            device=device,
+        )
+        self.waveform_generator = waveform_generator
+        self.preprocessor = preprocessor
+        self.prior = prior
+        self.device = device
+
+        self.tensors, self.vertices = gw.get_ifo_geometry("H1", "L1")
+        self.tensors = self.tensors.to(self.device)
+        self.vertices = self.vertices.to(self.device)
+    def sample_waveforms(self, N: int):
+        # sample parameters from prior
+        parameters = self.prior(N)
+        intrinsic_parameters = torch.vstack(
+            (
+                parameters["chirp_mass"],
+                parameters["mass_ratio"],
+                parameters["a_1"],
+                parameters["a_2"],
+                parameters["luminosity_distance"],
+                parameters["phase"],
+                parameters["theta_jn"],
+            )
+        )
+        # FIXME: generalize to other parameter combinations
+        # generate intrinsic waveform
+        plus_ref, cross_ref = self.waveform_generator.time_domain_strain(
+            *intrinsic_parameters, jitter_time=False
+        )
+        plus_jittered, cross_jittered = self.waveform_generator.time_domain_strain(
+            *intrinsic_parameters, jitter_time=True
+        )
+        dec_psi_ra = torch.vstack(
+            (
+                parameters["dec"],
+                parameters["psi"],
+                parameters["phi"]
+            )
+        )
+
+        waveforms_ref = gw.compute_observed_strain(
+            *dec_psi_ra,
+            detector_tensors=self.tensors,
+            detector_vertices=self.vertices,
+            sample_rate=self.waveform_generator.sampling_frequency,
+            plus=plus_ref,
+            cross=cross_ref,
+        )
+        waveforms_jittered = gw.compute_observed_strain(
+            *dec_psi_ra,
+            detector_tensors=self.tensors,
+            detector_vertices=self.vertices,
+            sample_rate=self.waveform_generator.sampling_frequency,
+            plus=plus_jittered,
+            cross=cross_jittered,
+        )
+        # FIXME: delta function distributions are removed, make it cleaner
+        intrinsic_parameters = torch.vstack(
+            (intrinsic_parameters[:2], intrinsic_parameters[4:]))
+        return torch.vstack((intrinsic_parameters, dec_psi_ra)), waveforms_ref, waveforms_jittered
+
+    def waveform_injector(self, X, Y):
+        N = len(X)
+        kernel_size = X.shape[-1]
+        parameters, waveforms_ref, waveforms_jittered = self.sample_waveforms(N)
+        start = 0
+        stop = kernel_size
+        waveforms_ref = waveforms_ref[:, :, start:stop]
+        waveforms_jittered = waveforms_jittered[:, :, start:stop]
+
+        X += waveforms_ref
+        Y += waveforms_jittered
+        return parameters, X, Y, waveforms_ref, waveforms_jittered
+
+    def __next__(self):
+        # fetch two slices of background
+        X = super().__next__()
+        Y = super().__next__()
+        parameters, X, Y, waveforms_ref, waveforms_jittered = self.waveform_injector(X, Y)
+        # whiten and scale parameters
+        if self.preprocessor:
+            transformed_X, transformed_parameters = self.preprocessor(
+                X, parameters.T
+            )
+            transformed_Y, _ = self.preprocessor(
+                Y, parameters.T
+            )
+        return (
+            transformed_X.to(dtype=torch.float32),
+            transformed_Y.to(dtype=torch.float32),
+            transformed_parameters.to(dtype=torch.float32),
+            waveforms_ref, waveforms_jittered
+        )
 
 class SignalDataSet(pl.LightningDataModule):
     def __init__(
@@ -238,6 +354,93 @@ class SignalDataSet(pl.LightningDataModule):
             device=self.device,
         )
         self.test_dataset = PEInMemoryDataset(
+            self.test_background,
+            waveform_generator=self.waveform_generator,
+            prior=self.prior,
+            preprocessor=self.preprocessor,
+            kernel_size=self.waveform_generator.number_of_samples
+            + self.waveform_generator.number_of_post_padding,
+            batch_size=1,
+            batches_per_epoch=self.hparams.batches_per_epoch,
+            coincident=False,
+            shuffle=False,
+            device=self.device,
+        )
+
+    def train_dataloader(self):
+        return self.training_dataset
+
+    def val_dataloader(self):
+        return self.validation_dataset
+
+    def test_dataloader(self):
+        return self.test_dataset
+
+
+class JitteredSignalDataset(SignalDataSet):
+    def setup(self, stage: str) -> None:
+        # load background and fit whitener
+        background = self.load_background()
+        self.background, self.valid_background = split(
+            background, 1 - self.hparams.valid_frac, 1
+        )
+        self.valid_background, self.test_background = split(
+            self.valid_background, 0.5, 1
+        )
+        self.standard_scaler = ChannelWiseScaler(8)  # FIXME: don't hardcode
+        # self.standard_scaler = torch.nn.Identity()
+        # FIXME: clean up the standard scaler fitting
+        self.prior = self.prior_func(self.device)
+        _samples = self.prior(10000)
+        _samples = torch.vstack((
+            _samples["chirp_mass"],
+            _samples["mass_ratio"],
+            _samples["luminosity_distance"],
+            _samples["phase"],
+            _samples["theta_jn"],
+            _samples["dec"],
+            _samples["psi"],
+            _samples["phi"]))
+        self.standard_scaler.fit(_samples)
+        self.standard_scaler.to(self.device)
+        self.preprocessor = Preprocessor(
+            self.num_ifos,
+            self.hparams.time_duration + 1,
+            self.hparams.sampling_frequency,
+            scaler=self.standard_scaler,
+        )
+        self.preprocessor.whitener.fit(1, *background, fftlength=2)
+        self.preprocessor.whitener.to(self.device)
+        # set waveform generator and initialize in-memory datasets
+        self.set_waveform_generator()
+        # FIXME: check if this is OK
+        self.training_dataset = TimeJitteredPEInMemoryDataset(
+            self.background,
+            waveform_generator=self.waveform_generator,
+            prior=self.prior,
+            preprocessor=self.preprocessor,
+            kernel_size=self.waveform_generator.number_of_samples
+            + self.waveform_generator.number_of_post_padding,
+            batch_size=self.hparams.batch_size,
+            batches_per_epoch=self.hparams.batches_per_epoch,
+            coincident=False,
+            shuffle=True,
+            device=self.device,
+        )
+        self.validation_dataset = TimeJitteredPEInMemoryDataset(
+            self.valid_background,
+            waveform_generator=self.waveform_generator,
+            prior=self.prior,
+            preprocessor=self.preprocessor,
+            kernel_size=self.waveform_generator.number_of_samples
+            + self.waveform_generator.number_of_post_padding,
+            batch_size=self.hparams.batch_size,
+            batches_per_epoch=self.hparams.batches_per_epoch,
+            coincident=False,
+            shuffle=False,
+            device=self.device,
+        )
+        self.test_dataset = TimeJitteredPEInMemoryDataset(
             self.test_background,
             waveform_generator=self.waveform_generator,
             prior=self.prior,
