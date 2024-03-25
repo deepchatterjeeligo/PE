@@ -372,6 +372,11 @@ class ResNet(pl.LightningModule):
         # use a fully connected layer to map from the
         # feature maps to the binary output that we need
         self.fc = nn.Linear(block_size * self.block.expansion, context_dim)
+        self.expander = nn.Sequential(
+            nn.Linear(context_dim, 20*context_dim),
+            nn.LeakyReLU(),
+            nn.Linear(20*context_dim, 2*context_dim),
+        )
 
         for m in self.modules():
             if isinstance(m, nn.Conv1d):
@@ -434,6 +439,7 @@ class ResNet(pl.LightningModule):
                 norm_layer,
             )
         )
+        layers.append(nn.Dropout(0.1))
         self.inplanes = planes * block.expansion
         for _ in range(1, blocks):
             layers.append(
@@ -447,6 +453,7 @@ class ResNet(pl.LightningModule):
                     norm_layer=norm_layer,
                 )
             )
+        layers.append(nn.Dropout(0.1))
 
         return nn.Sequential(*layers)
 
@@ -467,38 +474,93 @@ class ResNet(pl.LightningModule):
         return x
 
     def forward(self, x: Tensor) -> Tensor:
-        return self._forward_impl(x)
+        representation = self._forward_impl(x)
+        embedding = self.expander(representation)
+        return representation, embedding
 
     def training_step(self, batch, batch_idx):
+        if batch_idx < 10:
+            wt_repr, wt_cov, wt_std = 0.01, 2, 1
+        elif batch_idx < 20:
+            wt_repr, wt_cov, wt_std = 1, 1, 2
+        else:
+            wt_repr, wt_cov, wt_std = 1, 1, 1
         X_ref, X_jittered, *_ = batch
-        loss = self.vicreg_loss(self(X_ref), self(X_jittered))
+        _, X_emb = self(X_ref)
+        _, X_jittered_emb = self(X_jittered)
+        loss, *_ = self.vicreg_loss(X_emb, X_jittered_emb, wt_repr=wt_repr, wt_cov=wt_cov, wt_std=wt_std)
         self.log(
             "train_loss", loss, on_epoch=True, prog_bar=True, sync_dist=False
         )
-        return loss
+        return {'loss': loss}
+
+    def on_validation_epoch_start(self):
+        self.avg_repr = []
+        self.avg_cov = []
+        self.avg_std = []
 
     def validation_step(self, batch, batch_idx):
+        if batch_idx < 10:
+            wt_repr, wt_cov, wt_std = 1e-4, 2, 1
+        elif batch_idx < 20:
+            wt_repr, wt_cov, wt_std = 1e-4, 1, 2
+        else:
+            wt_repr, wt_cov, wt_std = 1e-4, 1, 1
         X_ref, X_jittered, *_ = batch
-        loss = self.vicreg_loss(self(X_ref), self(X_jittered))
+        _, X_emb = self(X_ref)
+        _, X_jittered_emb = self(X_jittered)
+        loss, repr_loss, cov_loss, std_loss = self.vicreg_loss(X_emb, X_jittered_emb, wt_repr=wt_repr, wt_cov=wt_cov, wt_std=wt_std)
         self.log(
             "valid_loss", loss, on_epoch=True, prog_bar=True, sync_dist=True
         )
-        return loss
+        self.avg_repr.append(repr_loss)
+        self.avg_cov.append(cov_loss)
+        self.avg_std.append(std_loss)
+        return {'loss': loss}
+
+    def on_validation_epoch_end(self):
+        self.print(
+            "Repr = {:.3f}; Cov = {:.3f}; Std = {:.3f}".format(
+                torch.tensor(self.avg_repr).mean(),
+                torch.tensor(self.avg_cov).mean(),
+                torch.tensor(self.avg_std).mean()
+            )
+        )
+        del self.avg_repr, self.avg_cov, self.avg_std
+
+    def on_test_epoch_start(self):
+        self.representations = []
+        self.parameter_list = []
+
+    def test_step(self, batch, batch_idx):
+        transformed_X, parameters, _  = batch
+        representation, _ = self(transformed_X)
+        self.representations.append(representation)
+        self.parameter_list.append(parameters)
+
+    def on_test_epoch_end(self):
+        import corner
+        import matplotlib.pyplot as plt
+        from itertools import cycle
+        colors = cycle(["red", "green", "black",])# "yellow", "cyan", "purple", "orange"])
+        figure = plt.figure(figsize=(6, 6))
+        for reps, params in zip(self.representations, self.parameter_list):
+            reps = reps.cpu().numpy()
+            params = params.cpu().numpy()[:2]  # only extract mc and q
+            figure = corner.corner(reps, fig=figure, color=next(colors), alpha=0.7)
+        plt.savefig('mc-q-reps.pdf')
+
 
     def configure_optimizers(self):
         opt = torch.optim.AdamW(self.parameters(), lr=torch.cuda.device_count() * 1e-3)
-        scheduler1 = torch.optim.lr_scheduler.ReduceLROnPlateau(opt)
-        scheduler2 = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.9)
-        return (
-            {
-                "optimizer": opt,
-                "lr_scheduler": {
-                    "scheduler": scheduler1,
-                    "monitor": "metric_to_track",
-                },
-            },
-            {"optimizer": opt, "lr_scheduler": scheduler2},
-        )
+        #sched = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.9)
+        sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt)
+        #scheduler_1 = torch.optim.lr_scheduler.ConstantLR(opt, total_iters=2)
+        #scheduler_2 = torch.optim.lr_scheduler.OneCycleLR(opt, total_steps=10, max_lr=1e-2)
+        #scheduler_3 = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.99)
+        #sched = torch.optim.lr_scheduler.SequentialLR(
+        #    opt, schedulers=[scheduler_1, scheduler_2, scheduler_3], milestones=[2, 12])
+        return {"optimizer": opt, "lr_scheduler": {"scheduler": sched, "monitor": "valid_loss"}}
 
 
 # TODO: implement as arg of ResNet instead?

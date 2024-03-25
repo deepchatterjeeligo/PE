@@ -7,12 +7,14 @@ from torch import nn
 # implemented from https://github.com/violatingcp/codec
 class VICRegLoss(nn.Module):
     def forward(self, x, y, wt_repr=1.0, wt_cov=1.0, wt_std=1.0):
+        x = x.unsqueeze(1)
+        y = y.unsqueeze(1)
         repr_loss = F.mse_loss(x, y)
 
         x = x - x.mean(dim=0)
         y = y - y.mean(dim=0)
         N = x.size(0)
-        D = x.size(1)
+        D = x.size(-1)
 
         std_x = torch.sqrt(x.var(dim=0) + 0.0001)
         std_y = torch.sqrt(y.var(dim=0) + 0.0001)

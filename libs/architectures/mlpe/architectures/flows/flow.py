@@ -21,12 +21,12 @@ class NormalizingFlow(ABC):
         """Sets the ``transforms`` attribute"""
         pass
 
-    @property
     def context_dim(self):
         dummy_tensor = torch.zeros(
             (1, self.n_ifos, self.strain_dim), device=self.device
         )
-        _context_dim = self.embedding_net(dummy_tensor).shape[-1]
+        rep, emb = self.embedding_net(dummy_tensor)
+        _context_dim = rep.shape[-1]
         return _context_dim
 
     @property
@@ -42,7 +42,7 @@ class NormalizingFlow(ABC):
         if not hasattr(self, "transforms"):
             raise RuntimeError("Flow is not built")
 
-        embedded_context = self.embedding_net(context)
+        embedded_context, _ = self.embedding_net(context)
         return self.flow.condition(embedded_context).log_prob(x)
 
     def sample(self, n, context):
@@ -52,6 +52,6 @@ class NormalizingFlow(ABC):
         if not hasattr(self, "transforms"):
             raise RuntimeError("Flow is not built")
 
-        embedded_context = self.embedding_net(context)
+        embedded_context, _ = self.embedding_net(context)
         n = [n] if isinstance(n, int) else n
         return self.flow.condition(embedded_context).sample(n)

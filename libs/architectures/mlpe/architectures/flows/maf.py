@@ -46,7 +46,7 @@ class MaskedAutoRegressiveFlow(pl.LightningModule, NormalizingFlow):
         """Returns single autoregressive transform"""
         arn = ConditionalAutoRegressiveNN(
             self.param_dim,
-            self.context_dim,
+            self.context_dim(),
             self.num_blocks * [self.hidden_features],
             nonlinearity=self.activation,
         )
