@@ -51,8 +51,8 @@ def nonspin_bbh_component_mass_parameter_sampler(device='cpu'):
             name="mass_2"
         ),
         luminosity_distance=distributions.PowerLaw(
-            torch.as_tensor(10, device=device, dtype=torch.float32),
-            torch.as_tensor(1000, device=device, dtype=torch.float32),
+            torch.as_tensor(100, device=device, dtype=torch.float32),
+            torch.as_tensor(2000, device=device, dtype=torch.float32),
             index=2,
             name="luminosity_distance"
         ),
@@ -94,7 +94,7 @@ def nonspin_bbh_chirp_mass_q_parameter_sampler(device='cpu'):
     return ParameterSampler(
         chirp_mass=distributions.Uniform(
             torch.as_tensor(20, device=device, dtype=torch.float32),
-            torch.as_tensor(40, device=device, dtype=torch.float32),
+            torch.as_tensor(60, device=device, dtype=torch.float32),
             name="chirp_mass"
         ),
         mass_ratio=distributions.Uniform(
@@ -103,8 +103,8 @@ def nonspin_bbh_chirp_mass_q_parameter_sampler(device='cpu'):
             name="mass_ratio"
         ),
         luminosity_distance=distributions.PowerLaw(
-            torch.as_tensor(10, device=device, dtype=torch.float32),
-            torch.as_tensor(1000, device=device, dtype=torch.float32),
+            torch.as_tensor(100, device=device, dtype=torch.float32),
+            torch.as_tensor(2000, device=device, dtype=torch.float32),
             index=2,
             name="luminosity_distance"
         ),

@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from itertools import cycle
 from pathlib import Path
 from typing import Callable, Optional, Tuple, TypeVar
 
@@ -8,7 +9,7 @@ import numpy as np
 import torch
 from waveforms import FrequencyDomainWaveformGenerator
 
-from ml4gw import gw
+from ml4gw import distributions, gw
 from ml4gw.dataloading import InMemoryDataset
 from ml4gw.transforms import ChannelWiseScaler
 from ml4gw.waveforms import IMRPhenomD, TaylorF2
@@ -60,7 +61,8 @@ class PEInMemoryDataset(InMemoryDataset):
         self.prior = prior
         self.device = device
 
-        self.tensors, self.vertices = gw.get_ifo_geometry("H1", "L1")
+        #self.tensors, self.vertices = gw.get_ifo_geometry("H1", "L1")
+        self.tensors, self.vertices = gw.get_ifo_geometry("H1", "L1", "V1")
         self.tensors = self.tensors.to(self.device)
         self.vertices = self.vertices.to(self.device)
 
@@ -83,7 +85,7 @@ class PEInMemoryDataset(InMemoryDataset):
         # FIXME: generalize to other parameter combinations
         # generate intrinsic waveform
         plus, cross = self.waveform_generator.time_domain_strain(
-            *intrinsic_parameters
+            *intrinsic_parameters, jitter_time=True  # changed to jitter time
         )
         dec_psi_ra = torch.vstack(
             (
@@ -127,6 +129,122 @@ class PEInMemoryDataset(InMemoryDataset):
         return transformed_X.to(dtype=torch.float32), transformed_parameters.to(dtype=torch.float32), waveforms
 
 
+def fixed_chirp_mass_q_prior(chirp_mass=20, mass_ratio=0.9):
+    prior = nonspin_bbh_chirp_mass_q_parameter_sampler()
+    prior.parameters['chirp_mass'] = distributions.DeltaFunction(
+        torch.as_tensor(chirp_mass, dtype=torch.float32), name="chirp_mass"
+    )
+    prior.parameters['mass_ratio'] = distributions.DeltaFunction(
+        torch.as_tensor(mass_ratio, dtype=torch.float32), name="mass_ratio"
+    )
+    return prior
+
+
+class CyclicDeltaFunctionDataset(InMemoryDataset):
+    def __init__(
+        self,
+        X: np.ndarray,
+        waveform_generator: FrequencyDomainWaveformGenerator,
+        kernel_size: int,
+        preprocessor: Optional[Callable] = None,
+        batch_size: int = 32,
+        batches_per_epoch: Optional[int] = None,
+        coincident: bool = True,
+        shuffle: bool = True,
+        device: str = "cpu",
+    ) -> None:
+        super().__init__(
+            X,
+            kernel_size,
+            batch_size=batch_size,
+            stride=1,
+            batches_per_epoch=batches_per_epoch,
+            coincident=coincident,
+            shuffle=shuffle,
+            device=device,
+        )
+        self.waveform_generator = waveform_generator
+        self.preprocessor = preprocessor
+        self.device = device
+
+        self.tensors, self.vertices = gw.get_ifo_geometry("H1", "L1")
+        self.tensors = self.tensors.to(self.device)
+        self.vertices = self.vertices.to(self.device)
+        self.prior = cycle([
+            fixed_chirp_mass_q_prior(chirp_mass=20, mass_ratio=0.9),
+            #fixed_chirp_mass_q_prior(chirp_mass=20, mass_ratio=0.8),
+            #fixed_chirp_mass_q_prior(chirp_mass=20, mass_ratio=0.7),
+            #fixed_chirp_mass_q_prior(chirp_mass=20, mass_ratio=0.6),
+            fixed_chirp_mass_q_prior(chirp_mass=25, mass_ratio=0.9),
+            #fixed_chirp_mass_q_prior(chirp_mass=30, mass_ratio=0.8),
+            #fixed_chirp_mass_q_prior(chirp_mass=30, mass_ratio=0.7),
+            fixed_chirp_mass_q_prior(chirp_mass=30, mass_ratio=0.9),
+        ])
+    def sample_waveforms(self, N: int):
+        # sample parameters from prior
+        _current_prior = next(self.prior)
+        parameters = _current_prior(N)
+        intrinsic_parameters = torch.vstack(
+            (
+                parameters["chirp_mass"],
+                parameters["mass_ratio"],
+                parameters["a_1"],
+                parameters["a_2"],
+                parameters["luminosity_distance"],
+                parameters["phase"],
+                parameters["theta_jn"],
+            )
+        ).to(device=self.device)  # FIXME: figure a better way
+        # only jittered waveforms
+        plus_jittered, cross_jittered = self.waveform_generator.time_domain_strain(
+            *intrinsic_parameters, jitter_time=True
+        )
+        dec_psi_ra = torch.vstack(
+            (
+                parameters["dec"],
+                parameters["psi"],
+                parameters["phi"]
+            )
+        ).to(device=self.device)
+        waveforms_jittered = gw.compute_observed_strain(
+            *dec_psi_ra,
+            detector_tensors=self.tensors,
+            detector_vertices=self.vertices,
+            sample_rate=self.waveform_generator.sampling_frequency,
+            plus=plus_jittered,
+            cross=cross_jittered,
+        )
+        # FIXME: delta function distributions are removed, make it cleaner
+        intrinsic_parameters = torch.vstack(
+            (intrinsic_parameters[:2], intrinsic_parameters[4:]))
+        return torch.vstack((intrinsic_parameters, dec_psi_ra)), waveforms_jittered
+
+    def waveform_injector(self, X):
+        N = len(X)
+        kernel_size = X.shape[-1]
+        parameters, waveforms_jittered = self.sample_waveforms(N)
+        start = 0
+        stop = kernel_size
+        waveforms_jittered = waveforms_jittered[:, :, start:stop]
+
+        X_jittered = X + waveforms_jittered
+        return parameters, X_jittered, waveforms_jittered
+
+    def __next__(self):
+        X = super().__next__()
+        parameters, X, waveforms_jittered = self.waveform_injector(X)
+        # whiten and scale parameters
+        if self.preprocessor:
+            transformed_X, transformed_parameters = self.preprocessor(
+                X, parameters.T
+            )
+        return (
+            transformed_X.to(dtype=torch.float32),
+            parameters.T.to(dtype=torch.float32)[0],
+            waveforms_jittered
+        )
+
+
 class TimeJitteredPEInMemoryDataset(InMemoryDataset):
     def __init__(
         self,
@@ -156,9 +274,11 @@ class TimeJitteredPEInMemoryDataset(InMemoryDataset):
         self.prior = prior
         self.device = device
 
-        self.tensors, self.vertices = gw.get_ifo_geometry("H1", "L1")
+        #self.tensors, self.vertices = gw.get_ifo_geometry("H1", "L1")
+        self.tensors, self.vertices = gw.get_ifo_geometry("H1", "L1", "V1")
         self.tensors = self.tensors.to(self.device)
         self.vertices = self.vertices.to(self.device)
+
     def sample_waveforms(self, N: int):
         # sample parameters from prior
         parameters = self.prior(N)
@@ -188,7 +308,6 @@ class TimeJitteredPEInMemoryDataset(InMemoryDataset):
                 parameters["phi"]
             )
         )
-
         waveforms_ref = gw.compute_observed_strain(
             *dec_psi_ra,
             detector_tensors=self.tensors,
@@ -210,7 +329,7 @@ class TimeJitteredPEInMemoryDataset(InMemoryDataset):
             (intrinsic_parameters[:2], intrinsic_parameters[4:]))
         return torch.vstack((intrinsic_parameters, dec_psi_ra)), waveforms_ref, waveforms_jittered
 
-    def waveform_injector(self, X, Y):
+    def waveform_injector(self, X):
         N = len(X)
         kernel_size = X.shape[-1]
         parameters, waveforms_ref, waveforms_jittered = self.sample_waveforms(N)
@@ -219,15 +338,13 @@ class TimeJitteredPEInMemoryDataset(InMemoryDataset):
         waveforms_ref = waveforms_ref[:, :, start:stop]
         waveforms_jittered = waveforms_jittered[:, :, start:stop]
 
-        X += waveforms_ref
-        Y += waveforms_jittered
-        return parameters, X, Y, waveforms_ref, waveforms_jittered
+        X_ref = X + waveforms_ref
+        X_jittered = X + waveforms_jittered
+        return parameters, X_ref, X_jittered, waveforms_ref, waveforms_jittered
 
     def __next__(self):
-        # fetch two slices of background
         X = super().__next__()
-        Y = super().__next__()
-        parameters, X, Y, waveforms_ref, waveforms_jittered = self.waveform_injector(X, Y)
+        parameters, X, Y, waveforms_ref, waveforms_jittered = self.waveform_injector(X)
         # whiten and scale parameters
         if self.preprocessor:
             transformed_X, transformed_parameters = self.preprocessor(
@@ -347,7 +464,7 @@ class SignalDataSet(pl.LightningDataModule):
             preprocessor=self.preprocessor,
             kernel_size=self.waveform_generator.number_of_samples
             + self.waveform_generator.number_of_post_padding,
-            batch_size=self.hparams.batch_size,
+            batch_size=self.hparams.batch_size//4,
             batches_per_epoch=self.hparams.batches_per_epoch,
             coincident=False,
             shuffle=False,
@@ -361,7 +478,7 @@ class SignalDataSet(pl.LightningDataModule):
             kernel_size=self.waveform_generator.number_of_samples
             + self.waveform_generator.number_of_post_padding,
             batch_size=1,
-            batches_per_epoch=self.hparams.batches_per_epoch,
+            batches_per_epoch=2*self.hparams.batches_per_epoch,
             coincident=False,
             shuffle=False,
             device=self.device,
@@ -375,6 +492,61 @@ class SignalDataSet(pl.LightningDataModule):
 
     def test_dataloader(self):
         return self.test_dataset
+
+
+class VICRegTestingDataset(SignalDataSet):
+    def setup(self, stage: str) -> None:
+        # load background and fit whitener
+        background = self.load_background()
+        self.background, self.valid_background = split(
+            background, 1 - self.hparams.valid_frac, 1
+        )
+        self.valid_background, self.test_background = split(
+            self.valid_background, 0.5, 1
+        )
+        self.standard_scaler = ChannelWiseScaler(8)  # FIXME: don't hardcode
+        # self.standard_scaler = torch.nn.Identity()
+        # FIXME: clean up the standard scaler fitting
+        self.prior = self.prior_func(self.device)
+        _samples = self.prior(10000)
+        _samples = torch.vstack((
+            _samples["chirp_mass"],
+            _samples["mass_ratio"],
+            _samples["luminosity_distance"],
+            _samples["phase"],
+            _samples["theta_jn"],
+            _samples["dec"],
+            _samples["psi"],
+            _samples["phi"]))
+        self.standard_scaler.fit(_samples)
+        self.standard_scaler.to(self.device)
+        self.preprocessor = Preprocessor(
+            self.num_ifos,
+            self.hparams.time_duration + 1,
+            self.hparams.sampling_frequency,
+            scaler=self.standard_scaler,
+        )
+        self.preprocessor.whitener.fit(1, *background, fftlength=2)
+        self.preprocessor.whitener.to(self.device)
+        # set waveform generator and initialize in-memory datasets
+        self.set_waveform_generator()
+        # FIXME: check if this is OK
+        self.test_dataset = CyclicDeltaFunctionDataset(
+            self.background,
+            waveform_generator=self.waveform_generator,
+            preprocessor=self.preprocessor,
+            kernel_size=self.waveform_generator.number_of_samples
+            + self.waveform_generator.number_of_post_padding,
+            batch_size=self.hparams.batch_size,
+            batches_per_epoch=self.hparams.batches_per_epoch,
+            coincident=False,
+            shuffle=False,
+            device=self.device,
+        )
+
+    def test_dataloader(self):
+        return self.test_dataset
+
 
 
 class JitteredSignalDataset(SignalDataSet):
