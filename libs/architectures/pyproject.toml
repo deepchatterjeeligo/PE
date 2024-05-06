@@ -8,12 +8,12 @@ packages = [{include = "mlpe"}]
 
 [tool.poetry.dependencies]
 python = ">=3.8,<3.11"
-torch = "^1.13"
+torch = "*"
 pyro-ppl = "*"
-lightning = "*"
+lightning = "==2.0.8"
 healpy = "^1.16"
 pandas = "^2.0"
-numpy = "^1.0"
+numpy = "<1.26"
 matplotlib = "^3.3"
 bilby = "^1.0"
 "mlpe.data" = {path = "../../libs/data", develop  = true}
@@ -28,7 +28,7 @@ wrapper = ["typeo"]
 
 [[tool.poetry.source]]
 name = "torch"
-url = "https://download.pytorch.org/whl/cu116"
+url = "https://download.pytorch.org/whl/cu121"
 secondary = true
 default = false
 

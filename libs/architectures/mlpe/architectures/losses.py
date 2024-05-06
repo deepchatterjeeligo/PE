@@ -19,12 +19,12 @@ class VICRegLoss(nn.Module):
         std_x = torch.sqrt(x.var(dim=0) + 0.0001)
         std_y = torch.sqrt(y.var(dim=0) + 0.0001)
         std_loss = (
-            torch.mean(F.relu(1 - std_x)) / 2
-            + torch.mean(F.relu(1 - std_y)) / 2
+            torch.mean(F.relu(1 - std_x))
+            + torch.mean(F.relu(1 - std_y))
         )
 
-        x = (x - x.mean(dim=0)) / x.std(dim=0)
-        y = (y - y.mean(dim=0)) / y.std(dim=0)
+        x = x - x.mean(dim=0)
+        y = y - y.mean(dim=0)
 
         # transpose dims 1 and 2; keep batch dim i.e. 0, unchanged
         cov_x = (x.transpose(1, 2) @ x) / (N - 1)

@@ -302,6 +302,13 @@ class ResNet(pl.LightningModule):
         # TODO: use Literal["stride", "dilation"] once typeo fix is in
         stride_type: Optional[List[str]] = None,
         norm_groups: Optional[int] = None,
+        learning_rate: Optional[float] = 1e-3,
+        momentum: Optional[float] = 1e-3,
+        weight_decay: Optional[float] = 1e-5,
+        wt_repr: Optional[float] = 1.0,
+        wt_cov: Optional[float] = 1.0,
+        wt_std: Optional[float] = 1.0,
+        embedding_dim_multiplier: Optional[int] = 3,
     ) -> None:
         super().__init__()
 
@@ -371,11 +378,20 @@ class ResNet(pl.LightningModule):
 
         # use a fully connected layer to map from the
         # feature maps to the binary output that we need
-        self.fc = nn.Linear(block_size * self.block.expansion, context_dim)
+        self.fc = nn.Sequential(
+            nn.Linear(block_size * self.block.expansion, 20*context_dim),
+            nn.LeakyReLU(),
+            nn.Linear(20*context_dim, context_dim),
+        )
+
         self.expander = nn.Sequential(
             nn.Linear(context_dim, 20*context_dim),
+            nn.BatchNorm1d(20*context_dim),
             nn.LeakyReLU(),
-            nn.Linear(20*context_dim, 2*context_dim),
+            nn.Linear(20*context_dim, 20*context_dim),
+            nn.BatchNorm1d(20*context_dim),
+            nn.LeakyReLU(),
+            nn.Linear(20*context_dim, embedding_dim_multiplier*context_dim),
         )
 
         for m in self.modules():
@@ -399,6 +415,12 @@ class ResNet(pl.LightningModule):
                 elif isinstance(m, BasicBlock):
                     nn.init.constant_(m.bn2.weight, 0)
         self.vicreg_loss = losses.VICRegLoss()
+        self.lr = learning_rate
+        self.momentum = momentum
+        self.weight_decay = weight_decay
+        self.wt_repr = wt_repr
+        self.wt_cov = wt_cov
+        self.wt_std = wt_std
 
     def _make_layer(
         self,
@@ -479,16 +501,10 @@ class ResNet(pl.LightningModule):
         return representation, embedding
 
     def training_step(self, batch, batch_idx):
-        if batch_idx < 10:
-            wt_repr, wt_cov, wt_std = 0.01, 2, 1
-        elif batch_idx < 20:
-            wt_repr, wt_cov, wt_std = 1, 1, 2
-        else:
-            wt_repr, wt_cov, wt_std = 1, 1, 1
         X_ref, X_jittered, *_ = batch
         _, X_emb = self(X_ref)
         _, X_jittered_emb = self(X_jittered)
-        loss, *_ = self.vicreg_loss(X_emb, X_jittered_emb, wt_repr=wt_repr, wt_cov=wt_cov, wt_std=wt_std)
+        loss, *_ = self.vicreg_loss(X_emb, X_jittered_emb, wt_repr=self.wt_repr, wt_cov=self.wt_cov, wt_std=self.wt_std)
         self.log(
             "train_loss", loss, on_epoch=True, prog_bar=True, sync_dist=False
         )
@@ -500,16 +516,10 @@ class ResNet(pl.LightningModule):
         self.avg_std = []
 
     def validation_step(self, batch, batch_idx):
-        if batch_idx < 10:
-            wt_repr, wt_cov, wt_std = 1e-4, 2, 1
-        elif batch_idx < 20:
-            wt_repr, wt_cov, wt_std = 1e-4, 1, 2
-        else:
-            wt_repr, wt_cov, wt_std = 1e-4, 1, 1
         X_ref, X_jittered, *_ = batch
         _, X_emb = self(X_ref)
         _, X_jittered_emb = self(X_jittered)
-        loss, repr_loss, cov_loss, std_loss = self.vicreg_loss(X_emb, X_jittered_emb, wt_repr=wt_repr, wt_cov=wt_cov, wt_std=wt_std)
+        loss, repr_loss, cov_loss, std_loss = self.vicreg_loss(X_emb, X_jittered_emb, wt_repr=self.wt_repr, wt_cov=self.wt_cov, wt_std=self.wt_std)
         self.log(
             "valid_loss", loss, on_epoch=True, prog_bar=True, sync_dist=True
         )
@@ -526,6 +536,8 @@ class ResNet(pl.LightningModule):
                 torch.tensor(self.avg_std).mean()
             )
         )
+        avg_loss = torch.tensor(self.avg_repr).mean() + torch.tensor(self.avg_cov).mean() + torch.tensor(self.avg_std).mean()
+        self.log("ptl/val_loss", avg_loss, sync_dist=True)
         del self.avg_repr, self.avg_cov, self.avg_std
 
     def on_test_epoch_start(self):
@@ -552,7 +564,9 @@ class ResNet(pl.LightningModule):
 
 
     def configure_optimizers(self):
-        opt = torch.optim.AdamW(self.parameters(), lr=torch.cuda.device_count() * 1e-3)
+        opt = torch.optim.SGD(
+            self.parameters(), lr=torch.cuda.device_count() * self.lr,
+            weight_decay=self.weight_decay, momentum=self.momentum)
         #sched = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.9)
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt)
         #scheduler_1 = torch.optim.lr_scheduler.ConstantLR(opt, total_iters=2)

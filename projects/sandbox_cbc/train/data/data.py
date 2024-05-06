@@ -61,8 +61,8 @@ class PEInMemoryDataset(InMemoryDataset):
         self.prior = prior
         self.device = device
 
-        #self.tensors, self.vertices = gw.get_ifo_geometry("H1", "L1")
-        self.tensors, self.vertices = gw.get_ifo_geometry("H1", "L1", "V1")
+        self.tensors, self.vertices = gw.get_ifo_geometry("H1", "L1")
+        # self.tensors, self.vertices = gw.get_ifo_geometry("H1", "L1", "V1")
         self.tensors = self.tensors.to(self.device)
         self.vertices = self.vertices.to(self.device)
 
@@ -129,13 +129,24 @@ class PEInMemoryDataset(InMemoryDataset):
         return transformed_X.to(dtype=torch.float32), transformed_parameters.to(dtype=torch.float32), waveforms
 
 
-def fixed_chirp_mass_q_prior(chirp_mass=20, mass_ratio=0.9):
+def fixed_chirp_mass_q_prior(chirp_mass=20, mass_ratio=0.9, luminosity_distance=100, dec=0, phi=0):
     prior = nonspin_bbh_chirp_mass_q_parameter_sampler()
     prior.parameters['chirp_mass'] = distributions.DeltaFunction(
         torch.as_tensor(chirp_mass, dtype=torch.float32), name="chirp_mass"
     )
     prior.parameters['mass_ratio'] = distributions.DeltaFunction(
         torch.as_tensor(mass_ratio, dtype=torch.float32), name="mass_ratio"
+    )
+    prior.parameters['luminosity_distance'] = distributions.DeltaFunction(
+        torch.as_tensor(luminosity_distance, dtype=torch.float32), name="luminosity_distance"
+    )
+    prior.parameters['dec'] = distributions.DeltaFunction(
+        torch.as_tensor(dec, dtype=torch.float32),
+        name="dec"
+    )
+    prior.parameters['phi'] = distributions.DeltaFunction(
+        torch.as_tensor(phi, dtype=torch.float32),
+        name="phi"
     )
     return prior
 
@@ -168,17 +179,18 @@ class CyclicDeltaFunctionDataset(InMemoryDataset):
         self.device = device
 
         self.tensors, self.vertices = gw.get_ifo_geometry("H1", "L1")
+        # self.tensors, self.vertices = gw.get_ifo_geometry("H1", "L1", "V1")
         self.tensors = self.tensors.to(self.device)
         self.vertices = self.vertices.to(self.device)
         self.prior = cycle([
-            fixed_chirp_mass_q_prior(chirp_mass=20, mass_ratio=0.9),
+            fixed_chirp_mass_q_prior(chirp_mass=15, mass_ratio=0.9, luminosity_distance=1000, dec=0, phi=1),
             #fixed_chirp_mass_q_prior(chirp_mass=20, mass_ratio=0.8),
             #fixed_chirp_mass_q_prior(chirp_mass=20, mass_ratio=0.7),
             #fixed_chirp_mass_q_prior(chirp_mass=20, mass_ratio=0.6),
-            fixed_chirp_mass_q_prior(chirp_mass=25, mass_ratio=0.9),
+            fixed_chirp_mass_q_prior(chirp_mass=30, mass_ratio=0.8, luminosity_distance=1000, dec=0, phi=1),
             #fixed_chirp_mass_q_prior(chirp_mass=30, mass_ratio=0.8),
             #fixed_chirp_mass_q_prior(chirp_mass=30, mass_ratio=0.7),
-            fixed_chirp_mass_q_prior(chirp_mass=30, mass_ratio=0.9),
+            fixed_chirp_mass_q_prior(chirp_mass=45, mass_ratio=0.7, luminosity_distance=1000, dec=0, phi=1),
         ])
     def sample_waveforms(self, N: int):
         # sample parameters from prior
@@ -240,7 +252,8 @@ class CyclicDeltaFunctionDataset(InMemoryDataset):
             )
         return (
             transformed_X.to(dtype=torch.float32),
-            parameters.T.to(dtype=torch.float32)[0],
+            transformed_parameters.to(dtype=torch.float32),
+            #parameters.T.to(dtype=torch.float32)[0],
             waveforms_jittered
         )
 
@@ -274,14 +287,15 @@ class TimeJitteredPEInMemoryDataset(InMemoryDataset):
         self.prior = prior
         self.device = device
 
-        #self.tensors, self.vertices = gw.get_ifo_geometry("H1", "L1")
-        self.tensors, self.vertices = gw.get_ifo_geometry("H1", "L1", "V1")
+        self.tensors, self.vertices = gw.get_ifo_geometry("H1", "L1")
+        # self.tensors, self.vertices = gw.get_ifo_geometry("H1", "L1", "V1")
         self.tensors = self.tensors.to(self.device)
         self.vertices = self.vertices.to(self.device)
 
     def sample_waveforms(self, N: int):
         # sample parameters from prior
-        parameters = self.prior(N)
+        # parameters = self.prior(N)
+        parameters = self.prior(1)
         intrinsic_parameters = torch.vstack(
             (
                 parameters["chirp_mass"],
@@ -292,7 +306,7 @@ class TimeJitteredPEInMemoryDataset(InMemoryDataset):
                 parameters["phase"],
                 parameters["theta_jn"],
             )
-        )
+        ).repeat(1, N)
         # FIXME: generalize to other parameter combinations
         # generate intrinsic waveform
         plus_ref, cross_ref = self.waveform_generator.time_domain_strain(
@@ -307,7 +321,9 @@ class TimeJitteredPEInMemoryDataset(InMemoryDataset):
                 parameters["psi"],
                 parameters["phi"]
             )
-        )
+        ).repeat(1, N)
+        # jitter one set, keep the other at fixed ref.
+
         waveforms_ref = gw.compute_observed_strain(
             *dec_psi_ra,
             detector_tensors=self.tensors,

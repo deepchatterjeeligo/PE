@@ -25,6 +25,7 @@ class MaskedAutoRegressiveFlow(pl.LightningModule, NormalizingFlow):
         num_transforms: int = 5,
         num_blocks: int = 2,
         activation: Callable = torch.tanh,
+        learning_rate: float = 1e-3
     ):
         super().__init__()
         self.param_dim, self.n_ifos, self.strain_dim = shape
@@ -39,6 +40,7 @@ class MaskedAutoRegressiveFlow(pl.LightningModule, NormalizingFlow):
         self.num_plot_corner = num_plot_corner
         # define embedding net and base distribution
         self.embedding_net = embedding_net
+        self.lr = learning_rate
         # build the transform - sets the transforms attrib
         self.build_flow()
 
@@ -82,7 +84,16 @@ class MaskedAutoRegressiveFlow(pl.LightningModule, NormalizingFlow):
         self.log(
             "valid_loss", loss, on_epoch=True, prog_bar=True, sync_dist=True
         )
+        self.avg_val_loss.append(loss)
         return loss
+
+    def on_validation_epoch_start(self):
+        self.avg_val_loss = []
+
+    def on_validation_epoch_end(self):
+        avg_loss = torch.stack(self.avg_val_loss).mean()
+        self.log("avg_valid_loss", avg_loss, sync_dist=True)
+        self.avg_val_loss.clear()
 
     def on_test_epoch_start(self):
         self.test_results = []
@@ -99,6 +110,7 @@ class MaskedAutoRegressiveFlow(pl.LightningModule, NormalizingFlow):
         )
         self.test_results.append(res)
         if batch_idx % 10 == 0 and self.num_plotted < self.num_plot_corner:
+            res.save_posterior_samples(f"{self.num_plotted}_result.dat")
             skymap_filename = f"{self.num_plotted}_mollview.png"
             res.plot_corner(
                 save=True,
@@ -129,6 +141,6 @@ class MaskedAutoRegressiveFlow(pl.LightningModule, NormalizingFlow):
         del self.test_results, self.num_plotted
 
     def configure_optimizers(self):
-        opt = self.optimizer(self.parameters(), lr=torch.cuda.device_count() * 1e-3)
+        opt = self.optimizer(self.parameters(), lr=torch.cuda.device_count() * self.lr)
         sched = self.scheduler(opt)
         return {"optimizer": opt, "lr_scheduler": {"scheduler": sched, "monitor": "valid_loss"}}

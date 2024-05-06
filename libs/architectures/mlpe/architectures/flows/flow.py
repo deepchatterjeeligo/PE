@@ -23,7 +23,7 @@ class NormalizingFlow(ABC):
 
     def context_dim(self):
         dummy_tensor = torch.zeros(
-            (1, self.n_ifos, self.strain_dim), device=self.device
+            (2, self.n_ifos, self.strain_dim), device=self.device
         )
         rep, emb = self.embedding_net(dummy_tensor)
         _context_dim = rep.shape[-1]
