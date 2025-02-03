@@ -25,6 +25,7 @@ project = dist.metadata["Name"]
 author = dist.metadata["Author"]
 copyright = f"2024, {author}"
 release = dist.metadata["Version"]
+version = dist.metadata["Version"]
 
 # -- General configuration ---------------------------------------------------
 
