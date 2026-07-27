@@ -40,7 +40,9 @@ class AmplfiDataset(pl.LightningDataModule):
             Path to directory containing training and testing data
         inference_params:
             List of parameters to perform inference on. Can be a subset
-            of the parameters that fully describes the waveforms
+            of the parameters that fully describes the waveforms.
+            If using a `waveform_file`, this list must be a subset of the
+            parameters.
         dec:
             The distribution of declinations to sample from
         psi:
@@ -71,6 +73,9 @@ class AmplfiDataset(pl.LightningDataModule):
             for training, validation and testing.
             See `train.data.waveforms.sampler`
             for methods this object should define.
+        waveform_file:
+            Path to the HDF5 file containing the waveforms. Assumed to
+            contain waveforms in frequency domain.
         parameter_transformer:
             A `ParameterTransformer` object that applies any
             additional transformations to parameters before
@@ -114,6 +119,7 @@ class AmplfiDataset(pl.LightningDataModule):
         batch_size: int,
         ifos: List[str],
         waveform_sampler: WaveformSampler,
+        waveform_file: Optional[str] = None,
         parameter_transformer: Optional[ParameterTransformer] = None,
         fftlength: Optional[int] = None,
         train_val_range: Optional[tuple[float, float]] = None,
@@ -133,6 +139,8 @@ class AmplfiDataset(pl.LightningDataModule):
         self.save_hyperparameters(ignore=["waveform_sampler"])
         self.init_logging(verbose)
         self.waveform_sampler = waveform_sampler
+        self.waveform_file = waveform_file
+        self._training_waveforms_from_disk = waveform_file is not None
         self.max_num_workers = max_num_workers
 
         self.dec, self.psi, self.phi = dec, psi, phi
@@ -164,6 +172,8 @@ class AmplfiDataset(pl.LightningDataModule):
             )
         )
         fs_utils.download_training_data(bucket, self.data_dir)
+        if self.waveform_file is not None:
+            fs_utils.download_waveform_file(bucket, self.waveform_file)
 
     # ================================================ #
     # Distribution utilities
@@ -436,6 +446,15 @@ class AmplfiDataset(pl.LightningDataModule):
         # modules are all still on CPU.
         # get_val_waveforms should be implemented by waveform_sampler object
         if stage in ["fit", "validate"]:
+            if self._training_waveforms_from_disk:
+                self._logger.info("Loading waveforms for training")
+                self.train_waveforms = (
+                    self.waveform_sampler.get_train_waveforms()
+                )
+                self._logger.info(
+                    f"Loaded {len(self.train_waveforms['cross'])} "
+                    f"waveforms for training"
+                )
             self._logger.info("Loading waveforms for validation")
             cross, plus, parameters = self.waveform_sampler.get_val_waveforms(
                 rank, world_size
@@ -514,7 +533,17 @@ class AmplfiDataset(pl.LightningDataModule):
         """
         if self.trainer.training:
             [batch] = batch
-            cross, plus, parameters = self.waveform_sampler.sample(batch)
+            if self._training_waveforms_from_disk:
+                self._logger.info("Assuming FrequencyDomainWaveformLoader")
+                N = len(batch)
+                polarizations, parameters = self.waveform_sampler.sample(N)
+                cross, plus = polarizations["cross"], polarizations["plus"]
+            else:
+                self._logger.info(
+                    "Assuming CBCGenerator that generates waveforms "
+                    "on the fly."
+                )
+                cross, plus, parameters = self.waveform_sampler.sample(batch)
             strain, asds, parameters, snrs = self.inject(
                 batch, cross, plus, parameters
             )
