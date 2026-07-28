@@ -9,6 +9,7 @@ from lightning.pytorch.cli import SaveConfigCallback
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.utilities import grad_norm
 
+from ..data.waveforms.generator.cbc import CBCGeneratorFromLoader
 
 class SaveConfigCallback(SaveConfigCallback):
     """
@@ -50,8 +51,10 @@ class SaveAugmentedBatch(pl.Callback):
             # and parameters to disk
             [X] = next(iter(trainer.train_dataloader))
             X = X.to(device)
-
-            cross, plus, parameters = datamodule.waveform_sampler.sample(X)
+            if isinstance(datamodule.waveform_sampler, CBCGeneratorFromLoader):
+                cross, plus, parameters = datamodule.waveform_sampler(len(X))
+            else:
+                cross, plus, parameters = datamodule.waveform_sampler.sample(X)
             strain, asds, parameters, snrs = datamodule.inject(
                 X, cross, plus, parameters
             )

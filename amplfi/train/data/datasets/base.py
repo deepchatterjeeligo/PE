@@ -14,6 +14,7 @@ from ..utils import fs as fs_utils
 from ..utils.utils import ZippedDataset
 from amplfi.train.prior import ParameterTransformer
 from ..waveforms.sampler import WaveformSampler
+from ..waveforms.generator.cbc import CBCGenerator, CBCGeneratorFromLoader
 import numpy as np
 from pathlib import Path
 import random
@@ -119,7 +120,6 @@ class AmplfiDataset(pl.LightningDataModule):
         batch_size: int,
         ifos: List[str],
         waveform_sampler: WaveformSampler,
-        waveform_file: Optional[str] = None,
         parameter_transformer: Optional[ParameterTransformer] = None,
         fftlength: Optional[int] = None,
         train_val_range: Optional[tuple[float, float]] = None,
@@ -139,8 +139,9 @@ class AmplfiDataset(pl.LightningDataModule):
         self.save_hyperparameters(ignore=["waveform_sampler"])
         self.init_logging(verbose)
         self.waveform_sampler = waveform_sampler
-        self.waveform_file = waveform_file
-        self._training_waveforms_from_disk = waveform_file is not None
+        self._training_waveforms_from_disk =  isinstance(
+            self.waveform_sampler, CBCGeneratorFromLoader
+        )
         self.max_num_workers = max_num_workers
 
         self.dec, self.psi, self.phi = dec, psi, phi
@@ -448,17 +449,24 @@ class AmplfiDataset(pl.LightningDataModule):
         if stage in ["fit", "validate"]:
             if self._training_waveforms_from_disk:
                 self._logger.info("Loading waveforms for training")
-                self.train_waveforms = (
-                    self.waveform_sampler.get_train_waveforms()
-                )
+                self._logger.info("Using CBCGeneratorFromLoader")
                 self._logger.info(
-                    f"Loaded {len(self.train_waveforms['cross'])} "
+                    f"Loaded {len(self.waveform_sampler.train_waveforms['cross'])} "
                     f"waveforms for training"
                 )
             self._logger.info("Loading waveforms for validation")
             cross, plus, parameters = self.waveform_sampler.get_val_waveforms(
                 rank, world_size
             )
+            if self._training_waveforms_from_disk:
+                self._logger.info("Converting validation waveforms to time-domain")
+                cross, plus, parameters = self.waveform_sampler.waveform_generator(
+                    {'cross': cross, 'plus': plus}, parameters
+                )
+                # convert to float32
+                cross, plus = cross.float(), plus.float()
+                for k in parameters.keys():
+                    parameters[k] = parameters[k].float()
             self.val_background = self.load_val_background(cross.shape[0])
             self._logger.info(f"Loaded {len(cross)} waveforms for validation")
             params = []
@@ -534,12 +542,10 @@ class AmplfiDataset(pl.LightningDataModule):
         if self.trainer.training:
             [batch] = batch
             if self._training_waveforms_from_disk:
-                self._logger.info("Assuming FrequencyDomainWaveformLoader")
-                N = len(batch)
-                polarizations, parameters = self.waveform_sampler.sample(N)
-                cross, plus = polarizations["cross"], polarizations["plus"]
+                self._logger.debug("Assuming FrequencyDomainWaveformLoader")
+                cross, plus, parameters = self.waveform_sampler(len(batch))
             else:
-                self._logger.info(
+                self._logger.debug(
                     "Assuming CBCGenerator that generates waveforms "
                     "on the fly."
                 )
@@ -547,6 +553,7 @@ class AmplfiDataset(pl.LightningDataModule):
             strain, asds, parameters, snrs = self.inject(
                 batch, cross, plus, parameters
             )
+            parameters = parameters.float()
 
         elif self.trainer.validating or self.trainer.sanity_checking:
             [cross, plus, parameters], [background] = batch

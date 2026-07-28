@@ -15,17 +15,17 @@
     mode: "min"
 
 # save wandb url to disk
-- class_path: amplfi.train.callbacks.SaveWandbUrl
+#- class_path: amplfi.train.callbacks.SaveWandbUrl
 
 # saves training batch to disk for inspection
 - class_path: amplfi.train.callbacks.SaveAugmentedBatch
 
-# - class_path: lightning.pytorch.callbacks.LearningRateMonitor
-#  init_args:
-#    logging_interval: epoch
+- class_path: lightning.pytorch.callbacks.LearningRateMonitor
+  init_args:
+    logging_interval: epoch
 
 # log estimate of gradients during training
-# - class_path: amplfi.train.callbacks.GradientTracker
+- class_path: amplfi.train.callbacks.GradientTracker
 
 # - class_path: amplfi.train.callbacks.EstimateSamplingLatency
 #  init_args:

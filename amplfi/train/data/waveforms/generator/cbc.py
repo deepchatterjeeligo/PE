@@ -1,9 +1,10 @@
 from typing import Callable
 import math
+import numpy as np
 
 import torch
 from ml4gw.constants import MSUN
-from ml4gw.waveforms import utils
+from ml4gw.waveforms.cbc import utils
 from ml4gw.waveforms.generator import (
     TimeDomainCBCWaveformGenerator,
     EXTRA_CYCLES,
@@ -12,6 +13,7 @@ from ml4gw.waveforms.generator import (
 
 from .generator import WaveformGenerator
 from ..loader import FrequencyDomainWaveformLoader
+from ..sampler import WaveformSampler
 
 
 class CBCGenerator(WaveformGenerator):
@@ -79,9 +81,6 @@ class TimeDomainCBCWaveformGeneratorFromLoader(TimeDomainCBCWaveformGenerator):
     domain waveforms.
 
     Args:
-        waveform_loader:
-            Waveform loader instance that reads a waveform file
-            and samples parameters and polarizations
         sample_rate:
             Rate at which returned time domain waveform will be
             sampled in Hz. This also specifies ``f_max`` for generating
@@ -102,15 +101,15 @@ class TimeDomainCBCWaveformGeneratorFromLoader(TimeDomainCBCWaveformGenerator):
 
     def __init__(
         self,
-        waveform_loader: FrequencyDomainWaveformLoader,
+        frequencies: np.ndarray,
         sample_rate: float,
         duration: float,
         f_min: float,
         f_ref: float,
         right_pad: float,
     ) -> None:
-        super().__init__()
-        self.waveform_loader = waveform_loader
+        torch.nn.Module.__init__(self)
+        self.frequencies = frequencies
         self.f_min = f_min
         self.sample_rate = sample_rate
         self.duration = duration
@@ -121,11 +120,11 @@ class TimeDomainCBCWaveformGeneratorFromLoader(TimeDomainCBCWaveformGenerator):
 
     def get_frequencies(self, df: float):
         """Get the frequencies from 0 to nyquist for corresponding df"""
-        return torch.from_numpy(self.waveform_loader.frequencies).to(
+        return torch.from_numpy(self.frequencies).to(
             torch.float32
         )
 
-    def generate_conditioned_fd_waveform(self, N):
+    def generate_conditioned_fd_waveform(self, pols, parameters):
         """
         Overrides the base class method to sample polarizations from
         file containing frequency-domain waveforms.
@@ -137,7 +136,6 @@ class TimeDomainCBCWaveformGeneratorFromLoader(TimeDomainCBCWaveformGenerator):
         # convert masses to kg, make sure
         # they are doubles so there is no
         # overflow in the calculations
-        pols, parameters = self.waveform_loader.sample(N)
 
         mass_1, mass_2 = (
             parameters["mass_1"].double() * MSUN,
@@ -261,9 +259,58 @@ class TimeDomainCBCWaveformGeneratorFromLoader(TimeDomainCBCWaveformGenerator):
 
         return hc_spectrum, hp_spectrum, parameters
 
+    def apply_td_condition_stage2(
+        self,
+        hc: torch.Tensor,
+        hp: torch.Tensor,
+        parameters: dict,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply stage 2 TD conditioning following XLALSimInspiralTDConditionStage2.
+
+        Tapers the first 1/(f_min * dt) samples and the
+        last 1/(f_isco * dt) samples with a cosine window.
+
+        See https://git.ligo.org/lscsoft/lalsuite/-/blob/master/lalsimulation/python/lalsimulation/gwsignal/core/conditioning_subroutines.py#L90
+        """  # noqa: E501
+        mass_1 = parameters["mass_1"].double() * MSUN
+        mass_2 = parameters["mass_2"].double() * MSUN
+        f_isco = utils.frequency_isco(mass_1, mass_2)
+
+        N = hp.shape[-1]
+        min_taper_samples = 4
+
+        # Taper start of signal
+        ntaper_start = max(
+            round(self.sample_rate / self.f_min), min_taper_samples
+        )
+        t = torch.arange(ntaper_start).type_as(hp)
+        w_start = 0.5 - 0.5 * torch.cos(torch.pi * t / ntaper_start)
+        hp[:, :ntaper_start] *= w_start
+        hc[:, :ntaper_start] *= w_start
+
+        # Taper end of signal, vectorized because f_isco is different
+        # for each waveform in the batch
+        ntaper_end = torch.clamp(
+            torch.round(self.sample_rate / f_isco), min=min_taper_samples
+        )
+        max_ntaper = int(ntaper_end.max().item())
+
+        idx = (max_ntaper - 1) - torch.arange(max_ntaper - 1).type_as(hp)
+        cos_arg = torch.pi * idx[None, :] / ntaper_end[:, None]
+        w_end = 0.5 - 0.5 * torch.cos(cos_arg)
+        in_taper = idx[None, :] < ntaper_end[:, None]
+        w_end = torch.where(in_taper, w_end, torch.ones_like(w_end))
+
+        hp[:, N - max_ntaper + 1 :] *= w_end
+        hc[:, N - max_ntaper + 1 :] *= w_end
+
+        return hc, hp
+
     def forward(
         self,
-        N,
+        pols: dict[str, torch.Tensor],
+        parameters: dict[str, torch.Tensor],
     ):
         """
         Generates a time-domain waveform from a frequency-domain approximant.
@@ -273,11 +320,13 @@ class TimeDomainCBCWaveformGeneratorFromLoader(TimeDomainCBCWaveformGenerator):
         (see ``generate_conditioned_fd_waveform``) and fft'd into the time-domain
 
         Args:
-            N:
-                Number of waveforms to sample
+            pols:
+                Dictionary containing the cross and plus polarizations
+            parameters:
+                Dictionary containing the waveform parameters
         """  # noqa: E501
 
-        hc, hp, parameters = self.generate_conditioned_fd_waveform(N)
+        hc, hp, parameters = self.generate_conditioned_fd_waveform(pols, parameters)
 
         # fft to time domain and apply appropriate scaling
         hc = torch.fft.irfft(hc) * self.sample_rate
@@ -298,11 +347,10 @@ class TimeDomainCBCWaveformGeneratorFromLoader(TimeDomainCBCWaveformGenerator):
         return hc, hp, parameters
 
 
-class CBCGeneratorFromLoader(WaveformGenerator):
+class CBCGeneratorFromLoader(FrequencyDomainWaveformLoader):
     def __init__(
         self,
         *args,
-        waveform_loader: FrequencyDomainWaveformLoader,
         f_min: float,
         f_ref: float,
         right_pad: float,
@@ -319,9 +367,6 @@ class CBCGeneratorFromLoader(WaveformGenerator):
             *args:
                 Positional arguments passed to
                 `amplfi.train.data.waveforms.generator.WaveformGenerator`
-            waveform_loader:
-                A FrequencyDomainWaveformLoader instance that loads waveforms
-                from disk
             f_min:
                 Lowest frequency at which waveform signal content
                 is generated
@@ -336,9 +381,8 @@ class CBCGeneratorFromLoader(WaveformGenerator):
         """
         super().__init__(*args, **kwargs)
         self.right_pad = right_pad
-        self.waveform_loader = waveform_loader
         self.waveform_generator = TimeDomainCBCWaveformGeneratorFromLoader(
-            self.waveform_loader,
+            self.frequencies,
             self.sample_rate,
             self.duration,
             f_min,
@@ -347,7 +391,8 @@ class CBCGeneratorFromLoader(WaveformGenerator):
         )
 
     def forward(self, N) -> torch.Tensor:
-        hc, hp, parameters = self.waveform_generator(N)
+        pols, parameters = self.sample(N)
+        hc, hp, parameters = self.waveform_generator(pols, parameters)
         waveforms = torch.stack([hc, hp], dim=1)
         if self.time_translator is not None:
             waveforms = self.time_translator(waveforms)
