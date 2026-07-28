@@ -70,7 +70,7 @@ class WaveformLoader(WaveformSampler):
         with h5py.File(self.waveform_file) as f:
             signals = torch.Tensor(f["signals"][start:stop])
             parameters = {}
-            for parameter in self._inference_params:
+            for parameter in self.inference_params:
                 parameters[parameter] = torch.Tensor(f[parameter][start:stop])
 
         return signals, parameters
@@ -91,6 +91,7 @@ class WaveformLoader(WaveformSampler):
         """
         Returns train waveforms for this device
         """
+        world_size, rank = self.get_world_size_and_rank()
         start, stop = self.get_slice_bounds(
             self.num_train_waveforms, world_size, rank
         )
@@ -100,6 +101,7 @@ class WaveformLoader(WaveformSampler):
         """
         Returns validation waveforms for this device
         """
+        world_size, rank = self.get_world_size_and_rank()
         start, stop = self.get_slice_bounds(
             self.num_val_waveforms, world_size, rank
         )
@@ -153,7 +155,9 @@ class FrequencyDomainWaveformLoader(WaveformSampler):
         val_frac:
             Fraction of waveforms to use for validation
     """
+
     _REQUIRED_PARAMETERS = ["mass_1", "mass_2", "s1z", "s2z"]
+
     def __init__(
         self,
         *args,
@@ -174,9 +178,14 @@ class FrequencyDomainWaveformLoader(WaveformSampler):
             # check that all required parameters are present in the file
             # create a superset of required and inference parameters
             self._inference_params = []
-            for param in (set(self._REQUIRED_PARAMETERS) | set(self.inference_params)):
+            for param in set(self._REQUIRED_PARAMETERS) | set(
+                self.inference_params
+            ):
                 if param not in f["parameters"]:
-                    raise ValueError(f"Required parameter '{param}' not found in waveform file.")
+                    raise ValueError(
+                        f"Required parameter '{param}' "
+                        f"not found in waveform file."
+                    )
                 self._inference_params.append(param)
 
         self.waveform_file = waveform_file
@@ -230,9 +239,7 @@ class FrequencyDomainWaveformLoader(WaveformSampler):
     def get_fit_parameters(self) -> torch.Tensor:
         return self.train_parameters
 
-    def get_train_waveforms(
-        self, world_size=1, rank=0
-    ):
+    def get_train_waveforms(self, world_size=1, rank=0):
         """
         Returns train waveforms for this device
         """
@@ -251,7 +258,7 @@ class FrequencyDomainWaveformLoader(WaveformSampler):
         # start counting from the back for val waveforms
         start, stop = -start, -stop or None
         signals, parameters = self.load_signals(start, stop)
-        return signals['cross'], signals['plus'], parameters
+        return signals["cross"], signals["plus"], parameters
 
     def get_test_waveforms(self, rank=0, world_size=1):
         """

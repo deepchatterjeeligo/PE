@@ -11,6 +11,7 @@ from lightning.pytorch.utilities import grad_norm
 
 from ..data.waveforms.generator.cbc import CBCGeneratorFromLoader
 
+
 class SaveConfigCallback(SaveConfigCallback):
     """
     Override of `lightning.pytorch.cli.SaveConfigCallback` for use with WandB

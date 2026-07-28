@@ -14,7 +14,7 @@ from ..utils import fs as fs_utils
 from ..utils.utils import ZippedDataset
 from amplfi.train.prior import ParameterTransformer
 from ..waveforms.sampler import WaveformSampler
-from ..waveforms.generator.cbc import CBCGenerator, CBCGeneratorFromLoader
+from ..waveforms.generator.cbc import CBCGeneratorFromLoader
 import numpy as np
 from pathlib import Path
 import random
@@ -139,7 +139,7 @@ class AmplfiDataset(pl.LightningDataModule):
         self.save_hyperparameters(ignore=["waveform_sampler"])
         self.init_logging(verbose)
         self.waveform_sampler = waveform_sampler
-        self._training_waveforms_from_disk =  isinstance(
+        self._training_waveforms_from_disk = isinstance(
             self.waveform_sampler, CBCGeneratorFromLoader
         )
         self.max_num_workers = max_num_workers
@@ -451,7 +451,8 @@ class AmplfiDataset(pl.LightningDataModule):
                 self._logger.info("Loading waveforms for training")
                 self._logger.info("Using CBCGeneratorFromLoader")
                 self._logger.info(
-                    f"Loaded {len(self.waveform_sampler.train_waveforms['cross'])} "
+                    f"Loaded "
+                    f"{len(self.waveform_sampler.train_waveforms['cross'])} "
                     f"waveforms for training"
                 )
             self._logger.info("Loading waveforms for validation")
@@ -459,9 +460,13 @@ class AmplfiDataset(pl.LightningDataModule):
                 rank, world_size
             )
             if self._training_waveforms_from_disk:
-                self._logger.info("Converting validation waveforms to time-domain")
-                cross, plus, parameters = self.waveform_sampler.waveform_generator(
-                    {'cross': cross, 'plus': plus}, parameters
+                self._logger.info(
+                    "Converting validation waveforms to time-domain"
+                )
+                cross, plus, parameters = (
+                    self.waveform_sampler.waveform_generator(
+                        {"cross": cross, "plus": plus}, parameters
+                    )
                 )
                 # convert to float32
                 cross, plus = cross.float(), plus.float()

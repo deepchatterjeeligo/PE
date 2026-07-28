@@ -13,7 +13,6 @@ from ml4gw.waveforms.generator import (
 
 from .generator import WaveformGenerator
 from ..loader import FrequencyDomainWaveformLoader
-from ..sampler import WaveformSampler
 
 
 class CBCGenerator(WaveformGenerator):
@@ -120,9 +119,7 @@ class TimeDomainCBCWaveformGeneratorFromLoader(TimeDomainCBCWaveformGenerator):
 
     def get_frequencies(self, df: float):
         """Get the frequencies from 0 to nyquist for corresponding df"""
-        return torch.from_numpy(self.frequencies).to(
-            torch.float32
-        )
+        return torch.from_numpy(self.frequencies).to(torch.float32)
 
     def generate_conditioned_fd_waveform(self, pols, parameters):
         """
@@ -326,7 +323,9 @@ class TimeDomainCBCWaveformGeneratorFromLoader(TimeDomainCBCWaveformGenerator):
                 Dictionary containing the waveform parameters
         """  # noqa: E501
 
-        hc, hp, parameters = self.generate_conditioned_fd_waveform(pols, parameters)
+        hc, hp, parameters = self.generate_conditioned_fd_waveform(
+            pols, parameters
+        )
 
         # fft to time domain and apply appropriate scaling
         hc = torch.fft.irfft(hc) * self.sample_rate
