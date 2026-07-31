@@ -61,7 +61,7 @@ data:
   init_args:
     # AmplfiDataset base class parameters
     data_dir: ${oc.env:AMPLFI_DATADIR}
-    inference_params: ['dchiMinus9', 'mass_1', 'mass_2']
+    inference_params: ['dchiMinus11', 'mass_1', 'mass_2']
     dec: 
       class_path: ml4gw.distributions.Cosine
     psi: 
@@ -82,12 +82,12 @@ data:
     fduration: 2
     psd_length: 10
     batches_per_epoch: 50
-    batch_size: 64
+    batch_size: 1000
     ifos: ["H1", "L1"]
     waveform_sampler: 
       class_path: amplfi.train.data.waveforms.generator.cbc.CBCGeneratorFromLoader
       init_args:
-        waveform_file: /projects/bcse/deep1018/github/amplfi/waveforms_dchiMinus9_fd.hdf5
+        waveform_file: ${oc.env:AMPLFI_WAVEFORM_FILE}
         val_frac: 0.1
         sample_rate: ${data.init_args.sample_rate}
         fduration: ${data.init_args.fduration}

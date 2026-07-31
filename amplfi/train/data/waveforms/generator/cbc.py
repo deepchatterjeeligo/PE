@@ -389,8 +389,19 @@ class CBCGeneratorFromLoader(FrequencyDomainWaveformLoader):
             right_pad + self.fduration / 2,
         )
 
+    def _ensure_device(self, pols, parameters, device):
+        for k, v in pols.items():
+            pols[k] = v.to(device)
+        for k, v in parameters.items():
+            parameters[k] = v.to(device)
+        return pols, parameters
+
     def forward(self, N) -> torch.Tensor:
         pols, parameters = self.sample(N)
+        # FIXME: this is a hack to get the device of the
+        # waveform generator, should be refactored
+        device = self.waveform_generator.highpass.a.device
+        pols, parameters = self._ensure_device(pols, parameters, device)
         hc, hp, parameters = self.waveform_generator(pols, parameters)
         waveforms = torch.stack([hc, hp], dim=1)
         if self.time_translator is not None:
